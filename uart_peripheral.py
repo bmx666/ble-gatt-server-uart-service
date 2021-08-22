@@ -1,5 +1,9 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
+# based on script from article "Creating BLE GATT Server (UART Service) on Raspberry Pi"
+# https://scribles.net/creating-ble-gatt-server-uart-service-on-raspberry-pi/
+
+import argparse
 import sys
 import dbus, dbus.mainloop.glib
 from gi.repository import GLib
@@ -13,15 +17,26 @@ DBUS_OM_IFACE =                'org.freedesktop.DBus.ObjectManager'
 LE_ADVERTISING_MANAGER_IFACE = 'org.bluez.LEAdvertisingManager1'
 GATT_MANAGER_IFACE =           'org.bluez.GattManager1'
 GATT_CHRC_IFACE =              'org.bluez.GattCharacteristic1'
-UART_SERVICE_UUID =            '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
-UART_RX_CHARACTERISTIC_UUID =  '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
-UART_TX_CHARACTERISTIC_UUID =  '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
-LOCAL_NAME =                   'rpi-gatt-server'
+
+DEFAULT_HCI_IFACE =  'hci0'
+DEFAULT_LOCAL_NAME = 'uart-gatt-server'
+
+NRF_UART_SERVICE_UUID =                 '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
+NRF_UART_RX_CHARACTERISTIC_UUID =       '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+NRF_UART_TX_CHARACTERISTIC_UUID =       '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
+
+CC254X_UART_SERVICE_UUID =              '0000ffe0-0000-1000-8000-00805f9b34fb'
+CC254X_UART_RX_TX_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb'
+
 mainloop = None
 
+HCI_IFACE = None
+LOCAL_NAME = None
+UART_SERVICE_UUID = None
+
 class TxCharacteristic(Characteristic):
-    def __init__(self, bus, index, service):
-        Characteristic.__init__(self, bus, index, UART_TX_CHARACTERISTIC_UUID,
+    def __init__(self, bus, uart_tx_characteristic_uuid, index, service):
+        Characteristic.__init__(self, bus, index, uart_tx_characteristic_uuid,
                                 ['notify'], service)
         self.notifying = False
         GLib.io_add_watch(sys.stdin, GLib.IO_IN, self.on_console_input)
@@ -53,18 +68,34 @@ class TxCharacteristic(Characteristic):
         self.notifying = False
 
 class RxCharacteristic(Characteristic):
-    def __init__(self, bus, index, service):
-        Characteristic.__init__(self, bus, index, UART_RX_CHARACTERISTIC_UUID,
+    def __init__(self, bus, uart_rx_characteristic_uuid, index, service):
+        Characteristic.__init__(self, bus, index, uart_rx_characteristic_uuid,
                                 ['write'], service)
 
     def WriteValue(self, value, options):
         print('remote: {}'.format(bytearray(value).decode()))
 
+class RxTxCharacteristic(RxCharacteristic, TxCharacteristic):
+    def __init__(self, bus, uart_rx_tx_characteristic_uuid, index, service):
+        Characteristic.__init__(self, bus, index, uart_rx_tx_characteristic_uuid,
+                                ['notify','write'], service)
+        self.notifying = False
+        GLib.io_add_watch(sys.stdin, GLib.IO_IN, self.on_console_input)
+
 class UartService(Service):
     def __init__(self, bus, index):
+
         Service.__init__(self, bus, index, UART_SERVICE_UUID, True)
-        self.add_characteristic(TxCharacteristic(bus, 0, self))
-        self.add_characteristic(RxCharacteristic(bus, 1, self))
+
+        if UART_SERVICE_UUID == CC254X_UART_SERVICE_UUID:
+            self.add_characteristic(RxTxCharacteristic(bus, CC254X_UART_RX_TX_CHARACTERISTIC_UUID, 0, self))
+
+        elif UART_SERVICE_UUID == NRF_UART_SERVICE_UUID:
+            self.add_characteristic(TxCharacteristic(bus, NRF_UART_TX_CHARACTERISTIC_UUID, 0, self))
+            self.add_characteristic(RxCharacteristic(bus, NRF_UART_RX_CHARACTERISTIC_UUID, 1, self))
+
+        else:
+            raise('invalid UART_SERVICE_UUID')
 
 class Application(dbus.service.Object):
     def __init__(self, bus):
@@ -106,7 +137,8 @@ def find_adapter(bus):
     objects = remote_om.GetManagedObjects()
     for o, props in objects.items():
         if LE_ADVERTISING_MANAGER_IFACE in props and GATT_MANAGER_IFACE in props:
-            return o
+            if str(o).endswith('/' + HCI_IFACE):
+                return o
         print('Skip adapter:', o)
     return None
 
@@ -142,4 +174,19 @@ def main():
         adv.Release()
 
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-u', '--uart_service_uuid', choices=['nrf', 'cc254x'], help="uart service")
+    parser.add_argument('-i', '--interface', help=f"hci interface, by default '{DEFAULT_HCI_IFACE}'", default=DEFAULT_HCI_IFACE)
+    parser.add_argument('-n', '--local-name', help=f"local name, by default '{DEFAULT_LOCAL_NAME}'", default=DEFAULT_LOCAL_NAME)
+    args = parser.parse_args()
+
+    if args.uart_service_uuid == 'cc254x':
+        UART_SERVICE_UUID = CC254X_UART_SERVICE_UUID
+    elif args.uart_service_uuid == 'nrf':
+        UART_SERVICE_UUID = NRF_UART_SERVICE_UUID
+
+    LOCAL_NAME = str(args.local_name)
+    HCI_IFACE = str(args.interface)
+
     main()
